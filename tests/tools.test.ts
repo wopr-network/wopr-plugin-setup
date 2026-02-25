@@ -197,7 +197,7 @@ describe("setup tools", () => {
       createSession("s1", "my-plugin", { title: "T", fields: [] });
       const result = await tool("setup.complete").handler({ sessionId: "s1" });
       expect(result.isError).toBeFalsy();
-      expect(getSession("s1")!.completed).toBe(true);
+      expect(getSession("s1")).toBeUndefined();
       expect(ctx.events.emit).toHaveBeenCalledWith(
         "setup:complete",
         expect.objectContaining({ pluginId: "my-plugin" }),

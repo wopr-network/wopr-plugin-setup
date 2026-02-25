@@ -3,9 +3,13 @@ import { logger } from "./logger.js";
 import { deleteSession, getSession } from "./session-store.js";
 import { validateKey as validateKeyFn } from "./validators.js";
 
+const PLATFORM_BASE_URL = process.env.WOPR_PLATFORM_URL ?? "http://localhost:7437";
+
 function textResult(text: string, isError = false): A2AToolResult {
   return { content: [{ type: "text", text }], isError };
 }
+
+let saveConfigQueue: Promise<void> = Promise.resolve();
 
 export function createSetupTools(ctx: WOPRPluginContext): A2AToolDefinition[] {
   return [
@@ -113,8 +117,15 @@ export function createSetupTools(ctx: WOPRPluginContext): A2AToolDefinition[] {
         const session = getSession(sessionId);
         if (!session) return textResult(`No active setup session: ${sessionId}`, true);
 
+        if (!pluginId.startsWith("@wopr-network/")) {
+          return textResult(
+            `Invalid pluginId: "${pluginId}". Only @wopr-network/ scoped packages may be installed.`,
+            true,
+          );
+        }
+
         try {
-          const res = await fetch("http://localhost:7437/plugins/install", {
+          const res = await fetch(`${PLATFORM_BASE_URL}/plugins/install`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name: pluginId }),
@@ -149,7 +160,7 @@ export function createSetupTools(ctx: WOPRPluginContext): A2AToolDefinition[] {
       async handler(args): Promise<A2AToolResult> {
         const service = args.service as string;
         try {
-          const res = await fetch(`http://localhost:7437/plugins/${service}/health`);
+          const res = await fetch(`${PLATFORM_BASE_URL}/plugins/${service}/health`);
           if (res.ok) {
             return textResult(`Connection to ${service} is healthy.`);
           }
@@ -201,17 +212,21 @@ export function createSetupTools(ctx: WOPRPluginContext): A2AToolDefinition[] {
           }
         }
 
-        try {
-          const currentConfig = ctx.getConfig<Record<string, unknown>>() ?? {};
-          currentConfig[key] = value;
-          await ctx.saveConfig(currentConfig);
-          session.mutations.push({ type: "saveConfig", key, value });
-          session.collectedValues.set(key, value);
-          logger.info({ msg: "Saved config", key, sessionId });
-          return textResult(`Saved "${key}" successfully.`);
-        } catch (err) {
-          return textResult(`Failed to save "${key}": ${String(err)}`, true);
-        }
+        const resultPromise = saveConfigQueue.then(async (): Promise<A2AToolResult> => {
+          try {
+            const currentConfig = ctx.getConfig<Record<string, unknown>>() ?? {};
+            currentConfig[key] = value;
+            await ctx.saveConfig(currentConfig);
+            session.mutations.push({ type: "saveConfig", key, value });
+            session.collectedValues.set(key, value);
+            logger.info({ msg: "Saved config", key, sessionId });
+            return textResult(`Saved "${key}" successfully.`);
+          } catch (err) {
+            return textResult(`Failed to save "${key}": ${String(err)}`, true);
+          }
+        });
+        saveConfigQueue = resultPromise.then(() => undefined);
+        return resultPromise;
       },
     },
 
@@ -232,7 +247,18 @@ export function createSetupTools(ctx: WOPRPluginContext): A2AToolDefinition[] {
         if (!session) return textResult(`No active setup session: ${sessionId}`, true);
         if (session.completed) return textResult("Setup already completed.", true);
 
+        const missingRequired = session.configSchema.fields
+          .filter((f) => f.required && !session.collectedValues.has(f.name))
+          .map((f) => f.name);
+        if (missingRequired.length > 0) {
+          return textResult(
+            `Cannot complete setup: required field(s) not collected: ${missingRequired.join(", ")}`,
+            true,
+          );
+        }
+
         session.completed = true;
+        deleteSession(sessionId);
 
         // biome-ignore lint/suspicious/noExplicitAny: custom event not in typed map
         ctx.events.emit("setup:complete" as any, {
@@ -273,7 +299,7 @@ export function createSetupTools(ctx: WOPRPluginContext): A2AToolDefinition[] {
               await ctx.saveConfig(currentConfig);
               logger.info({ msg: "Rolled back config", key: mutation.key, sessionId });
             } else if (mutation.type === "installDependency") {
-              const res = await fetch("http://localhost:7437/plugins/uninstall", {
+              const res = await fetch(`${PLATFORM_BASE_URL}/plugins/uninstall`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ name: mutation.pluginId }),
