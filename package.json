@@ -26,6 +26,7 @@
     "typescript": "^5.3.0",
     "vitest": "^4.0.18"
   },
+  "keywords": ["wopr-plugin"],
   "publishConfig": { "access": "public" },
   "files": ["dist"],
   "license": "MIT"
